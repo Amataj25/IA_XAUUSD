@@ -1,0 +1,2 @@
+# IA_XAUUSD
+IA Trading XAUUSD
