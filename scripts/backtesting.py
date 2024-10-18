@@ -22,14 +22,18 @@ def get_historical_data(symbol, timeframe, start_date, end_date):
     if rates is None or len(rates) == 0:
         logger.warning(f"No se pudieron obtener datos para {symbol} en el período especificado.")
         return pd.DataFrame()
-
+    
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s')
     df.set_index('time', inplace=True)
     df['MA8'] = df['close'].rolling(window=8).mean()
     if 'volume' not in df.columns:
         df['volume'] = 0  # Añadir una columna de volumen con valores 0 si no existe
-    return df
+    
+    # Imputar valores NaN en el DataFrame
+    df_imputed = df.interpolate(method='linear', limit_direction='forward')
+    
+    return df_imputed
 
 def calculate_atr(data, period=14):
     high_low = data['high'] - data['low']
@@ -155,7 +159,7 @@ def backtest_strategy(symbol, timeframe, start_date, end_date, initial_balance=1
     except KeyboardInterrupt:
         logger.info("Backtesting interrupted by user. Saving current progress...")
     except Exception as e:
-        logger.error(f"Error during backtesting: {e}")
+        logger.error(f"Error durante backtesting: {e}")
     finally:
         logger.info(f"Backtesting completed or interrupted. Total trades: {len(trades)}")
         return pd.DataFrame(trades), balance
@@ -171,7 +175,7 @@ def analyze_backtest_results(trades, initial_balance, final_balance):
             'total_profit': 0,
             'max_drawdown': 0,
             'final_balance': final_balance,
-            'return_percentage': 0
+            'return_percentage': (final_balance - initial_balance) / initial_balance * 100
         }
 
     df_trades = pd.DataFrame(trades)

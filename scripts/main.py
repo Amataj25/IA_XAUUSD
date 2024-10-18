@@ -2,8 +2,8 @@ import time
 import logging
 import MetaTrader5 as mt5
 import pandas as pd
-from integration import initialize_mt5, shutdown_mt5, get_account_info
-from strategy import get_real_time_data, process_and_predict
+from sklearn.impute import SimpleImputer
+from utils import get_real_time_data, process_and_predict
 from volatility_filter import analyze_market_conditions
 from risk_management import manage_risk
 from monitoring import log_trade_result

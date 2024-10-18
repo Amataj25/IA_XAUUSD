@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.impute import SimpleImputer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,11 +27,11 @@ secondary_model_file = 'linear_regression_model.pkl'
 models = {}
 scalers = {}
 
-def get_real_time_data(symbol, timeframe=mt5.TIMEFRAME_H1, num_candles=1000):
+def get_real_time_data(symbol, timeframe, num_candles):
     try:
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_candles)
         if rates is None or len(rates) == 0:
-            logger.warning(f"No se obtuvieron datos para {symbol} en timeframe {timeframe}")
+            logger.warning(f"No se pudieron obtener datos para {symbol} en el período especificado.")
             return pd.DataFrame()
 
         df = pd.DataFrame(rates)
@@ -78,28 +79,29 @@ def load_models():
 
 def select_best_model(data):
     if len(data) < 100:
-        logger.warning("Datos insuficientes para seleccionar el mejor modelo")
+        logger.warning(f"Datos insuficientes para seleccionar el mejor modelo")
         return None, None, None
 
     scores = {}
+    features = ['open', 'high', 'low', 'close', 'volume']
+    if 'MA8' in data.columns:
+        features.append('MA8')
+
     for model_name, model in models.items():
         if model is None:
             continue
         scaler = scalers[model_name]
-        X = data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
-        y = data['close'].shift(-1)
+        X = data[features]
+        X = X.interpolate(method='linear', limit_direction='forward')
         
-        if not hasattr(scaler, 'n_features_in_'):
-            scaler.fit(X)
-        
+        scaler.fit(X)
         X_scaled = scaler.transform(X)
         
-        if not hasattr(model, 'n_features_in_'):
-            model.fit(X_scaled[:-1], y[:-1].dropna())
+        model.fit(X_scaled[:-1], data['close'].shift(-1).dropna())
         
         y_pred = model.predict(X_scaled)
-        mse = mean_squared_error(y[:-1].dropna(), y_pred[:-1])
-        r2 = r2_score(y[:-1].dropna(), y_pred[:-1])
+        mse = mean_squared_error(data['close'].shift(-1).dropna(), y_pred[:-1])
+        r2 = r2_score(data['close'].shift(-1).dropna(), y_pred[:-1])
         scores[model_name] = {'mse': mse, 'r2': r2}
     
     if not scores:
@@ -115,10 +117,19 @@ def process_and_predict(data):
     for timeframe, df in data.items():
         if df.empty:
             logger.warning(f"No hay datos disponibles para el timeframe {timeframe}")
-            processed_data[timeframe] = pd.DataFrame()
+            processed_data[timeframe] = df
             continue
 
         try:
+            features = ['open', 'high', 'low', 'close', 'volume']
+            if 'MA8' in df.columns:
+                features.append('MA8')
+
+            X = df[features]
+            X = X.interpolate(method='linear', limit_direction='forward')
+            X = X.interpolate(method='linear', limit_direction='forward')
+            X = SimpleImputer(strategy='mean').fit_transform(X)
+
             best_model_name, model, scaler = select_best_model(df)
             
             if model is None or scaler is None:
@@ -126,16 +137,7 @@ def process_and_predict(data):
                 processed_data[timeframe] = df
                 continue
 
-            features = ['open', 'high', 'low', 'close', 'MA8']
-            if 'volume' in df.columns:
-                features.append('volume')
-            else:
-                logger.warning(f"Columna 'volume' no encontrada para timeframe {timeframe}. Usando solo OHLC y MA8.")
-                df['volume'] = 1
-
-            X = df[features]
-            X_scaled = scaler.transform(X)
-            df['Prediction'] = model.predict(X_scaled)
+            df['Prediction'] = model.predict(X)
             
             processed_data[timeframe] = df
             
@@ -155,9 +157,10 @@ def update_model(model_name, data):
     scaler = scalers[model_name]
     X = data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
     y = data['close'].shift(-1)
-    X = scaler.fit_transform(X)
+    X = X.interpolate(method='linear', limit_direction='forward')
     y = y[:-1].dropna()
     X = X[:-1]
+    
     model.fit(X, y)
     joblib.dump(model, os.path.join(model_dir, model_name))
     joblib.dump(scaler, os.path.join(model_dir, f'scaler_{model_name}'))
@@ -174,8 +177,8 @@ def create_basic_models():
             'MA8': np.random.rand(100)
         })
         X = example_data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
-        y = example_data['close'].shift(-1)
-
+        X = X.interpolate(method='linear', limit_direction='forward')
+        
         rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
         lr_model = LinearRegression()
 
@@ -186,10 +189,10 @@ def create_basic_models():
         lr_scaler.fit(X)
 
         X_scaled = rf_scaler.transform(X)
-        rf_model.fit(X_scaled[:-1], y[:-1].dropna())
+        rf_model.fit(X_scaled[:-1], example_data['close'].shift(-1).dropna())
         
         X_scaled = lr_scaler.transform(X)
-        lr_model.fit(X_scaled[:-1], y[:-1].dropna())
+        lr_model.fit(X_scaled[:-1], example_data['close'].shift(-1).dropna())
 
         joblib.dump(rf_model, os.path.join(model_dir, primary_model_file))
         joblib.dump(lr_model, os.path.join(model_dir, secondary_model_file))
