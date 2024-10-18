@@ -26,6 +26,34 @@ secondary_model_file = 'linear_regression_model.pkl'
 models = {}
 scalers = {}
 
+def get_real_time_data(symbol, timeframe=mt5.TIMEFRAME_H1, num_candles=1000):
+    try:
+        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_candles)
+        if rates is None or len(rates) == 0:
+            logger.warning(f"No se obtuvieron datos para {symbol} en timeframe {timeframe}")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('time', inplace=True)
+        df['timeframe'] = timeframe
+        
+        required_columns = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
+        for col in required_columns:
+            if col not in df.columns:
+                df[col] = 0
+        
+        if 'tick_volume' in df.columns and 'volume' not in df.columns:
+            df['volume'] = df['tick_volume']
+        
+        df['MA8'] = df['close'].rolling(window=8).mean()
+        
+        logger.info(f"Datos obtenidos para {symbol} en timeframe {timeframe}: {len(df)} velas")
+        return df
+    except Exception as e:
+        logger.error(f"Error al obtener datos en tiempo real para {symbol} en timeframe {timeframe}: {e}")
+        return pd.DataFrame()
+
 def load_models():
     for model_file in [primary_model_file, secondary_model_file]:
         model_path = os.path.join(model_dir, model_file)
@@ -58,7 +86,7 @@ def select_best_model(data):
         if model is None:
             continue
         scaler = scalers[model_name]
-        X = data[['open', 'high', 'low', 'close', 'volume']]
+        X = data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
         y = data['close'].shift(-1)
         
         if not hasattr(scaler, 'n_features_in_'):
@@ -82,6 +110,42 @@ def select_best_model(data):
     logger.info(f"Modelo seleccionado: {best_model}, MSE: {scores[best_model]['mse']}, R2: {scores[best_model]['r2']}")
     return best_model, models[best_model], scalers[best_model]
 
+def process_and_predict(data):
+    processed_data = {}
+    for timeframe, df in data.items():
+        if df.empty:
+            logger.warning(f"No hay datos disponibles para el timeframe {timeframe}")
+            processed_data[timeframe] = pd.DataFrame()
+            continue
+
+        try:
+            best_model_name, model, scaler = select_best_model(df)
+            
+            if model is None or scaler is None:
+                logger.warning(f"No se pudo seleccionar un modelo para el timeframe {timeframe}")
+                processed_data[timeframe] = df
+                continue
+
+            features = ['open', 'high', 'low', 'close', 'MA8']
+            if 'volume' in df.columns:
+                features.append('volume')
+            else:
+                logger.warning(f"Columna 'volume' no encontrada para timeframe {timeframe}. Usando solo OHLC y MA8.")
+                df['volume'] = 1
+
+            X = df[features]
+            X_scaled = scaler.transform(X)
+            df['Prediction'] = model.predict(X_scaled)
+            
+            processed_data[timeframe] = df
+            
+            logger.info(f"Predicción realizada para el timeframe {timeframe}")
+        except Exception as e:
+            logger.error(f"Error al procesar y predecir para timeframe {timeframe}: {e}")
+            processed_data[timeframe] = df
+
+    return processed_data
+
 def update_model(model_name, data):
     if len(data) < 100:
         logger.warning(f"Datos insuficientes para actualizar el modelo {model_name}")
@@ -89,7 +153,7 @@ def update_model(model_name, data):
 
     model = models[model_name]
     scaler = scalers[model_name]
-    X = data[['open', 'high', 'low', 'close', 'volume']]
+    X = data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
     y = data['close'].shift(-1)
     X = scaler.fit_transform(X)
     y = y[:-1].dropna()
@@ -99,90 +163,6 @@ def update_model(model_name, data):
     joblib.dump(scaler, os.path.join(model_dir, f'scaler_{model_name}'))
     logger.info(f"Modelo {model_name} actualizado y guardado")
 
-def get_real_time_data(symbol, timeframe=mt5.TIMEFRAME_H1, num_candles=1000):
-    try:
-        rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, num_candles)
-        if rates is None or len(rates) == 0:
-            logger.warning(f"No se obtuvieron datos para {symbol} en timeframe {timeframe}")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rates)
-        df['time'] = pd.to_datetime(df['time'], unit='s')
-        df.set_index('time', inplace=True)
-        df['timeframe'] = timeframe
-        
-        required_columns = ['open', 'high', 'low', 'close', 'tick_volume', 'spread', 'real_volume']
-        for col in required_columns:
-            if col not in df.columns:
-                df[col] = 0
-        
-        if 'tick_volume' in df.columns and 'volume' not in df.columns:
-            df['volume'] = df['tick_volume']
-        
-        logger.info(f"Datos obtenidos para {symbol} en timeframe {timeframe}: {len(df)} velas")
-        return df
-    except Exception as e:
-        logger.error(f"Error al obtener datos en tiempo real para {symbol} en timeframe {timeframe}: {e}")
-        return pd.DataFrame()
-
-def process_and_predict(data):
-    try:
-        if not models:
-            logger.warning("No hay modelos disponibles. Usando una estrategia alternativa.")
-            for tf, df in data.items():
-                df['Prediction'] = df['close'].rolling(window=20).mean()
-                logger.info(f"Predicción para {tf}: último cierre = {df['close'].iloc[-1]}, predicción = {df['Prediction'].iloc[-1]}")
-            return data
-
-        if mt5.TIMEFRAME_H1 not in data:
-            logger.error("Datos de timeframe de 1 hora no disponibles para seleccionar el mejor modelo")
-            return data
-
-        best_model_name, model, scaler = select_best_model(data[mt5.TIMEFRAME_H1])
-        
-        if model is None or scaler is None:
-            logger.error("No se pudo seleccionar un modelo válido")
-            return data
-
-        for tf, df in data.items():
-            try:
-                required_columns = ['open', 'high', 'low', 'close', 'volume']
-                for col in required_columns:
-                    if col not in df.columns:
-                        logger.warning(f"Columna {col} no encontrada en el timeframe {tf}. Usando valores predeterminados.")
-                        df[col] = df['close'] if col != 'volume' else 0
-
-                X = df[required_columns]
-                
-                if not hasattr(scaler, 'n_features_in_'):
-                    scaler.fit(X)
-                
-                X_scaled = scaler.transform(X)
-                
-                if not hasattr(model, 'n_features_in_'):
-                    y = df['close'].shift(-1)
-                    model.fit(X_scaled[:-1], y[:-1].dropna())
-                
-                df['Prediction'] = model.predict(X_scaled)
-                logger.info(f"Predicción para {tf}: último cierre = {df['close'].iloc[-1]}, predicción = {df['Prediction'].iloc[-1]}")
-            except Exception as e:
-                logger.error(f"Error al procesar y predecir para timeframe {tf}: {e}")
-                df['Prediction'] = np.nan
-        
-        if int(time.time()) % 86400 < 3600:  # En la primera hora de cada día
-            if mt5.TIMEFRAME_D1 in data:
-                for model_name in models.keys():
-                    update_model(model_name, data[mt5.TIMEFRAME_D1])
-            else:
-                logger.warning("Datos diarios no disponibles para actualizar los modelos")
-        
-        return data
-    except Exception as e:
-        logger.error(f"Error general al procesar y predecir: {e}")
-        for tf, df in data.items():
-            df['Prediction'] = np.nan
-        return data
-
 def create_basic_models():
     try:
         example_data = pd.DataFrame({
@@ -190,9 +170,10 @@ def create_basic_models():
             'high': np.random.rand(100),
             'low': np.random.rand(100),
             'close': np.random.rand(100),
-            'volume': np.random.rand(100)
+            'volume': np.random.rand(100),
+            'MA8': np.random.rand(100)
         })
-        X = example_data[['open', 'high', 'low', 'close', 'volume']]
+        X = example_data[['open', 'high', 'low', 'close', 'volume', 'MA8']]
         y = example_data['close'].shift(-1)
 
         rf_model = RandomForestRegressor(n_estimators=100, random_state=42)

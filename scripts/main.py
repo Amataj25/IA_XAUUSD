@@ -10,28 +10,30 @@ from monitoring import log_trade_result
 from high_low_retest import analyze_high_low_retest
 from trend_lines import analyze_trend
 from telegram_notifications import send_telegram_message
+from trend_analysis import confirm_trend_multiple_timeframes
+from dynamic_position_sizing import calculate_dynamic_lot_size, calculate_dynamic_sl_tp
+from liquidity_analysis import analyze_liquidity
+from backtesting import backtest_strategy, analyze_backtest_results
+from parameter_optimization import run_optimization
+from performance_analysis import analyze_performance
 
-# Configurar logging
+# Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Configurar MetaTrader 5
-ACCOUNT = 31302194  # Tu número de cuenta demo
+# Configuración de MetaTrader 5
+ACCOUNT = 31302194
 PASSWORD = "L1m1c0y_198o"
 SERVER = "Deriv-Demo"
 
 # Parámetros de trading
 SYMBOL = "XAUUSD"
-INITIAL_LOT = 0.01  # Tamaño de lote inicial
-SL_PIPS = 100  # Stop Loss en pips
-TP_PIPS = 200  # Take Profit en pips
-MAX_DAILY_PROFIT = 10  # Límite de ganancia diaria en dólares (ajustado)
-MIN_PRICE_DIFFERENCE = 0.00005  # Diferencia mínima entre señal y precio actual (ajustado)
-
-# Definir el umbral para la fuerza del retesteo (ajustado)
-THRESHOLD = 30  
-
-# Definir timeframes y umbrales de volatilidad
+INITIAL_LOT = 0.01
+SL_PIPS = 100
+TP_PIPS = 200
+MAX_DAILY_PROFIT = 10
+MIN_PRICE_DIFFERENCE = 0.00005
+THRESHOLD = 30
 TIMEFRAMES = [mt5.TIMEFRAME_W1, mt5.TIMEFRAME_D1, mt5.TIMEFRAME_H4, mt5.TIMEFRAME_H1]
 
 def check_daily_profit():
@@ -43,51 +45,6 @@ def check_daily_profit():
     
     profit = sum(deal.profit for deal in deals)
     return profit
-
-def adjust_lot_size(symbol, base_lot, account_balance, market_volatility):
-    volatility_factor = 1 - (market_volatility / 100)  
-    balance_factor = min(account_balance / 10000, 2)  
-    
-    adjusted_lot = base_lot * volatility_factor * balance_factor
-    
-    symbol_info = mt5.symbol_info(symbol)
-    min_lot = symbol_info.volume_min
-    max_lot = symbol_info.volume_max
-    step = symbol_info.volume_step
-    
-    adjusted_lot = max(min_lot, min(adjusted_lot, max_lot))
-    adjusted_lot = round(adjusted_lot / step) * step
-    
-    logger.info(f"Lote ajustado: {adjusted_lot} (base: {base_lot}, volatilidad: {market_volatility}, balance: {account_balance})")
-    return adjusted_lot
-
-def adjust_sl_tp(volatility, current_price, order_type):
-    volatility_factor = volatility / 20
-    symbol_info = mt5.symbol_info(SYMBOL)
-    min_distance = symbol_info.point * symbol_info.trade_stops_level
-
-    if order_type == mt5.ORDER_TYPE_BUY:
-        adjusted_sl = max(min_distance, min(200, int(SL_PIPS * volatility_factor)))
-        adjusted_tp = max(min_distance, min(400, int(TP_PIPS * volatility_factor)))
-        
-        sl_price = current_price - adjusted_sl * symbol_info.point
-        tp_price = current_price + adjusted_tp * symbol_info.point
-        
-    else:  # SELL order
-        adjusted_sl = max(min_distance, min(200, int(SL_PIPS * volatility_factor)))
-        adjusted_tp = max(min_distance, min(400, int(TP_PIPS * volatility_factor)))
-        
-        sl_price = current_price + adjusted_sl * symbol_info.point
-        tp_price = current_price - adjusted_tp * symbol_info.point
-
-    logger.info(f"SL ajustado: {adjusted_sl}, TP ajustado: {adjusted_tp}")
-    return sl_price, tp_price
-
-def manage_open_positions(symbol):
-    positions = mt5.positions_get(symbol=symbol)
-    if positions:
-        for position in positions:
-            logger.info(f"Posición abierta: {position.ticket}, Profit: {position.profit}")
 
 def calculate_dynamic_support_resistance(data):
     support = min(data['low'])
@@ -104,20 +61,14 @@ def calculate_retest_strength(current_price, previous_high, previous_low):
     return strength
 
 def get_current_price(symbol):
-    """
-    Obtiene el precio actual utilizando diferentes métodos.
-    """
-    # Método 1: Usar symbol_info_tick
     tick = mt5.symbol_info_tick(symbol)
     if tick is not None and tick.last > 0:
         return tick.last
 
-    # Método 2: Obtener las últimas velas
     rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
     if rates is not None and len(rates) > 0:
         return rates[0]['close']
 
-    # Método 3: Usar symbol_info
     symbol_info = mt5.symbol_info(symbol)
     if symbol_info is not None and symbol_info.last > 0:
         return symbol_info.last
@@ -148,15 +99,31 @@ def place_order_with_sl_tp(symbol, order_type, lot_size, price, sl_price, tp_pri
     
     return result
 
-def log_trade_result(result):
-    if result.retcode == mt5.TRADE_RETCODE_DONE:
-        logger.info(f"Trade successful: Order {result.order}, Volume: {result.volume}, Price: {result.price}")
-    else:
-        logger.error(f"Trade failed: {result.retcode} - {result.comment}")
+def manage_open_positions(symbol):
+    positions = mt5.positions_get(symbol=symbol)
+    if positions:
+        for position in positions:
+            logger.info(f"Posición abierta: {position.ticket}, Profit: {position.profit}")
+
+def run_backtest():
+    if not mt5.initialize():
+        print("initialize() failed, error code =", mt5.last_error())
+        return
+
+    start_date = '2023-01-01'
+    end_date = '2023-12-31'
+    initial_balance = 10000
+
+    trades, final_balance = backtest_strategy(SYMBOL, mt5.TIMEFRAME_H4, start_date, end_date, initial_balance)
+    results = analyze_backtest_results(trades, initial_balance, final_balance)
+
+    logger.info("Resultados del Backtesting:")
+    for key, value in results.items():
+        logger.info(f"{key}: {value}")
+
+    mt5.shutdown()
 
 def main():
-    lot = INITIAL_LOT
-
     if not initialize_mt5(ACCOUNT, PASSWORD, SERVER):
         logger.error("Failed to initialize MetaTrader5")
         return
@@ -172,7 +139,7 @@ def main():
             logger.info(f"Iniciando ciclo de trading {iteration}/{max_iterations}")
 
             daily_profit = check_daily_profit()
-            logger.info(f"Ganancia diaria actual: ${daily_profit:.2f}") 
+            logger.info(f"Ganancia diaria actual: ${daily_profit:.2f}")
             
             if daily_profit >= MAX_DAILY_PROFIT:
                 logger.info(f"Límite diario alcanzado.")
@@ -202,20 +169,9 @@ def main():
             
             support, resistance = calculate_dynamic_support_resistance(processed_data[recommended_tf])
             
-            # Intentar obtener el precio actual con el nuevo método
-            max_retries = 3
-            current_price = None
-            
-            for attempt in range(max_retries):
-                current_price = get_current_price(SYMBOL)
-                if current_price is not None and current_price > 0:
-                    break
-                
-                logger.warning("El precio actual es inválido o cero. Intentando obtener el precio nuevamente.")
-                time.sleep(1)
-            
+            current_price = get_current_price(SYMBOL)
             if current_price is None or current_price == 0:
-                logger.warning("El precio actual sigue siendo inválido o cero. No se puede continuar.")
+                logger.warning("El precio actual es inválido. No se puede continuar.")
                 continue
             
             logger.info(f"Precio actual obtenido: {current_price}")
@@ -225,11 +181,20 @@ def main():
             account_info = get_account_info()
             if account_info:
                 market_volatility = market_conditions[recommended_timeframe]['ATR']
-                lot = adjust_lot_size(SYMBOL, INITIAL_LOT, account_info['balance'], market_volatility)
+                lot = calculate_dynamic_lot_size(SYMBOL, account_info['balance'], 1, SL_PIPS, 5)
+                if lot is None:
+                    logger.warning("No se pudo calcular el tamaño del lote. Usando tamaño de lote inicial.")
+                    lot = INITIAL_LOT
             else:
                 logger.warning("No se pudo obtener información de la cuenta. Usando tamaño de lote inicial.")
                 lot = INITIAL_LOT
 
+            # Análisis de liquidez
+            liquidity_levels, sweep_detected, swept_level = analyze_liquidity(processed_data[recommended_tf], current_price)
+
+            if sweep_detected:
+                logger.info(f"Barrido de liquidez detectado en nivel: {swept_level}")
+            
             retest_results = analyze_high_low_retest(real_time_data, [recommended_tf])
             trend_results = analyze_trend(real_time_data, [recommended_tf])
             
@@ -245,23 +210,44 @@ def main():
                 logger.warning(f"Market is closed for {SYMBOL}.")
                 continue
 
+            trend = confirm_trend_multiple_timeframes(real_time_data[mt5.TIMEFRAME_H1], real_time_data[mt5.TIMEFRAME_H4])
+            if trend is None:
+                logger.info("No hay concordancia en las tendencias de 1H y 4H. Omitiendo entrada.")
+                continue
+
             if ((retest_direction == 'buy' or trend_direction == 'buy') and 
-                (signal > current_price * (1 + MIN_PRICE_DIFFERENCE) or current_price > support * (1 + MIN_PRICE_DIFFERENCE))):
-                logger.info(f"Condiciones de compra cumplidas.")
-                sl_price, tp_price = adjust_sl_tp(market_conditions[recommended_timeframe]['ATR'], current_price, mt5.ORDER_TYPE_BUY)
-                result = place_order_with_sl_tp(SYMBOL, mt5.ORDER_TYPE_BUY, lot, symbol_info.ask, sl_price, tp_price)
-                log_trade_result(result)
+                (signal > current_price * (1 + MIN_PRICE_DIFFERENCE) or current_price > support * (1 + MIN_PRICE_DIFFERENCE)) and 
+                (sweep_detected and swept_level in ['recent_low', 'previous_day_low'])):
                 
+                logger.info(f"Condiciones de compra cumplidas con barrido de liquidez en {swept_level}.")
+                
+                sl, tp = calculate_dynamic_sl_tp(SYMBOL, current_price, market_conditions[recommended_timeframe]['ATR'], 'buy')
+                
+                if sl is None or tp is None:
+                    logger.warning("No se pudieron calcular SL y TP. Omitiendo entrada.")
+                    continue
+                
+                result = place_order_with_sl_tp(SYMBOL, mt5.ORDER_TYPE_BUY, lot, symbol_info.ask, sl, tp)
+                log_trade_result(result)
+
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
                     send_telegram_message(f"Orden de compra enviada ({recommended_timeframe})")
                 else:
                     logger.error(f"Error al enviar orden de compra: {result.retcode} - {result.comment}")
                     
             elif ((retest_direction == 'sell' or trend_direction == 'sell') and 
-                  (signal < current_price * (1 - MIN_PRICE_DIFFERENCE) or current_price < resistance * (1 - MIN_PRICE_DIFFERENCE))):
-                logger.info(f"Condiciones de venta cumplidas.")
-                sl_price, tp_price = adjust_sl_tp(market_conditions[recommended_timeframe]['ATR'], current_price, mt5.ORDER_TYPE_SELL)
-                result = place_order_with_sl_tp(SYMBOL, mt5.ORDER_TYPE_SELL, lot, symbol_info.bid, sl_price, tp_price)
+                  (signal < current_price * (1 - MIN_PRICE_DIFFERENCE) or current_price < resistance * (1 - MIN_PRICE_DIFFERENCE)) and 
+                  (sweep_detected and swept_level in ['recent_high', 'previous_day_high'])):
+
+                logger.info(f"Condiciones de venta cumplidas con barrido de liquidez en {swept_level}.")
+                
+                sl, tp = calculate_dynamic_sl_tp(SYMBOL, current_price, market_conditions[recommended_timeframe]['ATR'], 'sell')
+                
+                if sl is None or tp is None:
+                    logger.warning("No se pudieron calcular SL y TP. Omitiendo entrada.")
+                    continue
+                
+                result = place_order_with_sl_tp(SYMBOL, mt5.ORDER_TYPE_SELL, lot, symbol_info.bid, sl, tp)
                 log_trade_result(result)
 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -280,4 +266,12 @@ def main():
         shutdown_mt5()
 
 if __name__ == "__main__":
-    main()
+    mode = input("Seleccione el modo (1: Trading en vivo, 2: Backtesting, 3: Optimización de parámetros): ")
+    if mode == '1':
+        main()
+    elif mode == '2':
+        run_backtest()
+    elif mode == '3':
+        run_optimization()
+    else:
+        print("Modo no válido seleccionado.")
